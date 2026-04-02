@@ -1,0 +1,10 @@
+.env
+config.ini
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+documents/
+photos/
+videos/
