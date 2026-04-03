@@ -13,8 +13,11 @@ from bot.rdc_client import RDCClient
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.WARNING,
 )
+# Our modules log at INFO, everything else at WARNING
+logging.getLogger("__main__").setLevel(logging.INFO)
+logging.getLogger("bot").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 
