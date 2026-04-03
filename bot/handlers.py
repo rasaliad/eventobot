@@ -105,6 +105,8 @@ async def _authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return False
 
     row = res.rows[0]
+    logger.info("sl_usuario columns: %s", res.columns)
+    logger.info("sl_usuario row (%d cols): %s", len(row), row)
     ud = context.user_data
     ud["funcion_id"] = _to_int(row[4])
     ud["botones_on"] = _to_int(row[5])
@@ -114,7 +116,7 @@ async def _authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ud["evento_id"] = _to_int(row[9])
     ud["idioma"] = _to_int(row[10]) or 1
     ud["opcion"] = _to_int(row[11])
-    ud["rol_id"] = _to_int(row[14])
+    ud["rol_id"] = _to_int(row[14]) if len(row) > 14 else 0
     return True
 
 
