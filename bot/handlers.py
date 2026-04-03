@@ -69,8 +69,6 @@ def _keyboard(context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
     row2 = []
     if _rol(context) == 1:
         row2.append(KeyboardButton(t("bQuien", lang)))
-    row2.append(KeyboardButton(t("bBoleta", lang)))
-    row2.append(KeyboardButton(t("bBoletas", lang)))
     return ReplyKeyboardMarkup([row1, row2], resize_keyboard=True)
 
 
@@ -121,7 +119,9 @@ async def _authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE,
     ud["funcion_name"] = str(_col("FUNCION", "") or "")
     ud["evento_id"] = _to_int(_col("EVENTO_ID"))
     ud["idioma"] = _to_int(_col("IDIOMA")) or 1
-    ud["opcion"] = _to_int(_col("OPCION"))
+    # Preserve local opcion (e.g. 9=waiting for barcode) if already set
+    if ud.get("opcion", 0) == 0:
+        ud["opcion"] = _to_int(_col("OPCION"))
     return True
 
 
@@ -256,7 +256,8 @@ async def _asistencia_total(context: ContextTypes.DEFAULT_TYPE):
 
 async def _send_totales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await _asistencia_total(context)
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                    reply_markup=_keyboard(context))
 
 
 # ── Detalles ─────────────────────────────────────────────────────────────────
@@ -301,7 +302,8 @@ async def _asistencia_detalle(context: ContextTypes.DEFAULT_TYPE):
 
 async def _send_detalles(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await _asistencia_detalle(context)
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                    reply_markup=_keyboard(context))
 
 
 # ── Quien ────────────────────────────────────────────────────────────────────
@@ -350,7 +352,7 @@ async def _consultar_boleta(barcode: str, context: ContextTypes.DEFAULT_TYPE) ->
 
     if fid == 0:
         return t("NoFuncionSeleccionada", lang)
-    if not barcode.isdigit():
+    if not barcode or len(barcode) < 5:
         return t("NoBoletaInvalido", lang)
 
     try:
@@ -429,7 +431,8 @@ async def boleta_command_handler(update: Update, context: ContextTypes.DEFAULT_T
         return
     if context.args:
         msg = await _consultar_boleta(context.args[0], context)
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                        reply_markup=_keyboard(context))
     else:
         context.user_data["opcion"] = 9
         lang = _lang(context)
@@ -473,20 +476,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Keyboard button: Totales
     if text in _BTN_TOTALES:
+        context.user_data["opcion"] = 0
         await _send_totales(update, context)
         return
 
     # Keyboard button: Detalles
     if text in _BTN_DETALLES:
+        context.user_data["opcion"] = 0
         await _send_detalles(update, context)
-        return
-
-    # Keyboard button: Boleta — enter barcode mode
-    if text in _BTN_BOLETA:
-        context.user_data["opcion"] = 9
-        await update.message.reply_text(
-            t("EnviarIdFuncion", lang).replace("funcion", "boleta").replace("Event ID", "Ticket barcode"),
-            parse_mode=ParseMode.HTML)
         return
 
     # Keyboard button: Reportes
@@ -494,52 +491,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_reportes(update, context)
         return
 
-    # Waiting for a barcode
-    opcion = context.user_data.get("opcion", 0)
-    if opcion == 9 and text.isdigit() and len(text) >= 14:
-        msg = await _consultar_boleta(text, context)
-        context.user_data["opcion"] = 0
-        user = update.effective_user
-        await _update_user(
-            user.id, user.first_name or "", user.last_name or "",
-            user.username or "", fid, context.user_data.get("botones_on", 0), 0, context)
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # Numeric input < 5 chars = function ID
-    if text.isdigit() and len(text) < 5:
-        user = update.effective_user
-        res = await _rdc(context).execute_query("funcion", [str(user.id), int(text), lang])
-        if res and res.rows:
-            row = res.rows[0]
-            new_fid = _to_int(row[0])
-            new_fname = str(row[1])
-            if new_fid > 0:
-                context.user_data["funcion_id"] = new_fid
-                context.user_data["funcion_name"] = new_fname
-                context.user_data["opcion"] = 0
-                await _update_user(
-                    user.id, user.first_name or "", user.last_name or "",
-                    user.username or "", new_fid, context.user_data.get("botones_on", 0), 0, context)
-                await update.message.reply_text(
-                    t("FuncionSel", lang, p1=new_fname), parse_mode=ParseMode.HTML,
-                    reply_markup=_keyboard(context))
-                return
-            else:
-                await update.message.reply_text(
-                    new_fname or t("FuncionNE", lang, p1=text), parse_mode=ParseMode.HTML)
-                return
-
-    # Barcode (>= 14 digits)
-    if text.isdigit() and len(text) >= 14:
-        msg = await _consultar_boleta(text, context)
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
-        return
-
-    # Default
-    fname = context.user_data.get("funcion_name", "")
-    await update.message.reply_text(
-        t("EstasAqui", lang, p1=fname), parse_mode=ParseMode.HTML)
+    # Any other text = treat as ticket barcode
+    msg = await _consultar_boleta(text, context)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                    reply_markup=_keyboard(context))
 
 
 # ── Register handlers ────────────────────────────────────────────────────────
