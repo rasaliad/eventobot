@@ -48,7 +48,7 @@ def _lang(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 def _rol(context: ContextTypes.DEFAULT_TYPE) -> int:
-    return context.user_data.get("rol_id", 0)
+    return context.user_data.get("cliente_id", 0)
 
 
 # Button labels — used to match incoming text
@@ -105,18 +105,23 @@ async def _authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return False
 
     row = res.rows[0]
-    logger.info("sl_usuario columns: %s", res.columns)
-    logger.info("sl_usuario row (%d cols): %s", len(row), row)
+    cols = res.columns  # {column_name: index}
+
+    def _col(name, default=0):
+        idx = cols.get(name)
+        if idx is not None and idx < len(row):
+            return row[idx]
+        return default
+
     ud = context.user_data
-    ud["funcion_id"] = _to_int(row[4])
-    ud["botones_on"] = _to_int(row[5])
-    ud["estatus"] = _to_int(row[6])
-    ud["cliente_id"] = _to_int(row[7])
-    ud["funcion_name"] = str(row[8] or "")
-    ud["evento_id"] = _to_int(row[9])
-    ud["idioma"] = _to_int(row[10]) or 1
-    ud["opcion"] = _to_int(row[11])
-    ud["rol_id"] = _to_int(row[14]) if len(row) > 14 else 0
+    ud["funcion_id"] = _to_int(_col("FUNCION_ID"))
+    ud["botones_on"] = _to_int(_col("BOTONES_ON"))
+    ud["estatus"] = _to_int(_col("ESTATUS"))
+    ud["cliente_id"] = _to_int(_col("CLIENTE_ID"))
+    ud["funcion_name"] = str(_col("FUNCION", "") or "")
+    ud["evento_id"] = _to_int(_col("EVENTO_ID"))
+    ud["idioma"] = _to_int(_col("IDIOMA")) or 1
+    ud["opcion"] = _to_int(_col("OPCION"))
     return True
 
 
