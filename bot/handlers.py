@@ -24,6 +24,7 @@ from telegram.ext import (
     filters,
 )
 
+from .charts import generate_chart
 from .i18n import t
 from .rdc_client import RDCClient
 
@@ -57,19 +58,25 @@ _BTN_DETALLES = {"Detalles", "Details"}
 _BTN_QUIEN = {"Quien", "Who"}
 _BTN_BOLETA = {"Boleta", "Ticket"}
 _BTN_REPORTES = {"Reportes", "Reports"}
+_BTN_GRAFICO = {"\U0001f4ca Grafico", "\U0001f4ca Chart"}
 
 
 def _keyboard(context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
-    """Build the fixed reply keyboard. 'Quien' row only for rol_id=1."""
+    """Build the fixed reply keyboard."""
     lang = _lang(context)
     row1 = [
         KeyboardButton(t("bAsistenciaTot", lang)),
         KeyboardButton(t("bAsistenciaDet", lang)),
     ]
     row2 = []
+    if context.user_data.get("botones_on", 0) == 1:
+        row2.append(KeyboardButton("\U0001f4ca Grafico" if lang == 1 else "\U0001f4ca Chart"))
     if _rol(context) == 1:
         row2.append(KeyboardButton(t("bQuien", lang)))
-    return ReplyKeyboardMarkup([row1, row2], resize_keyboard=True)
+    rows = [row1]
+    if row2:
+        rows.append(row2)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -306,6 +313,53 @@ async def _send_detalles(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=_keyboard(context))
 
 
+# ── Image charts ─────────────────────────────────────────────────────────────
+
+async def _send_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send combined image: detail table + totals pie chart."""
+    rdc = _rdc(context)
+    lang = _lang(context)
+    fid = context.user_data.get("funcion_id", 0)
+    fname = context.user_data.get("funcion_name", "")
+    await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
+    try:
+        res_det = await rdc.execute_query("asistencia_detalle", [fid])
+        res_tot = await rdc.execute_query("asistencia_total", [fid, lang])
+    except Exception:
+        logger.error("Error querying data for chart", exc_info=True)
+        await update.message.reply_text("Error getting data", reply_markup=_keyboard(context))
+        return
+    if not res_det or not res_det.rows:
+        await update.message.reply_text(t("NoExisteFuncion", lang),
+                                        parse_mode=ParseMode.HTML, reply_markup=_keyboard(context))
+        return
+
+    # Extract totals for pie
+    entered = 0
+    remaining = 0
+    if res_tot and res_tot.rows:
+        for row in res_tot.rows:
+            desc = str(row[0]).strip().upper()
+            val_str = str(row[1]).strip().replace(",", "")
+            try:
+                val = int(float(val_str))
+            except (ValueError, TypeError):
+                val = 0
+            if "ENTRADA" in desc or "ENTER" in desc:
+                entered = val
+            elif "RESTA" in desc or "REMAIN" in desc:
+                remaining = val
+
+    try:
+        img = generate_chart(fname, res_det.rows, entered, remaining, lang)
+        await update.message.reply_photo(
+            photo=img, reply_markup=_keyboard(context),
+            read_timeout=60, write_timeout=60)
+    except Exception:
+        logger.error("Error generating chart image", exc_info=True)
+        await update.message.reply_text("Error generating image", reply_markup=_keyboard(context))
+
+
 # ── Quien ────────────────────────────────────────────────────────────────────
 
 async def _send_quien(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -484,6 +538,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in _BTN_DETALLES:
         context.user_data["opcion"] = 0
         await _send_detalles(update, context)
+        return
+
+    # Keyboard button: Grafico
+    if text in _BTN_GRAFICO:
+        context.user_data["opcion"] = 0
+        await _send_grafico(update, context)
         return
 
     # Keyboard button: Reportes
