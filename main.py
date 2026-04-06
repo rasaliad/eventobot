@@ -8,7 +8,9 @@ import sys
 from telegram import BotCommand
 from telegram.ext import Application
 
+from bot.firebird_client import FirebirdClient
 from bot.handlers import register_handlers
+from bot.notifications import check_boleta_notifications, check_percentage_notifications
 from bot.rdc_client import RDCClient
 
 logging.basicConfig(
@@ -23,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 async def post_init(app: Application):
     """Set bot commands menu after startup."""
-    # Clear old menu first to force Telegram to refresh
     await app.bot.delete_my_commands()
     commands = [
         BotCommand("start", "Iniciar / Start"),
@@ -52,10 +53,46 @@ def main():
         logger.error("BOT_TOKEN not configured. Set it in config.ini or as environment variable.")
         sys.exit(1)
 
+    # Firebird direct connection (for notifications)
+    fb_database = config.get("firebird", "database", fallback="")
+    fb_user = config.get("firebird", "user", fallback="SYSDBA")
+    fb_password = config.get("firebird", "password", fallback="masterkey")
+
+    # Notification settings
+    alert_interval = int(config.get("notifications", "alert_interval_seconds", fallback="10"))
+    pct_interval = int(config.get("notifications", "percentage_interval_seconds", fallback="120"))
+    pct_step = int(config.get("notifications", "percentage_step", fallback="10"))
+
     rdc = RDCClient(host=rdc_host, port=rdc_port)
 
     app = Application.builder().token(token).post_init(post_init).build()
     app.bot_data["rdc"] = rdc
+    app.bot_data["pct_step"] = pct_step
+
+    # Setup Firebird if configured
+    if fb_database:
+        fb = FirebirdClient(database=fb_database, user=fb_user, password=fb_password)
+        app.bot_data["firebird"] = fb
+        logger.info("Firebird configured: %s", fb_database)
+
+        # Background jobs — separate intervals
+        job_queue = app.job_queue
+        job_queue.run_repeating(
+            check_boleta_notifications,
+            interval=alert_interval,
+            first=10,
+            name="boleta_notifications",
+        )
+        job_queue.run_repeating(
+            check_percentage_notifications,
+            interval=pct_interval,
+            first=60,
+            name="percentage_notifications",
+        )
+        logger.info("Alerts every %ds, percentage every %ds (step %d%%)",
+                    alert_interval, pct_interval, pct_step)
+    else:
+        logger.warning("Firebird not configured — notifications disabled")
 
     register_handlers(app)
 
