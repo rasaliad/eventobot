@@ -520,14 +520,14 @@ async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Validate boleta and ask for personal comment before saving."""
     lang = _lang(context)
     fid = context.user_data.get("funcion_id", 0)
+    user_id = str(update.effective_user.id)
+    fb = _fb(context)
     logger.info("_add_monitor_boleta: code=%s fid=%s opcion=%s", code, fid, context.user_data.get("opcion"))
     if fb is None:
         await update.message.reply_text(
             "Sistema de alertas no disponible (Firebird no configurado).",
             reply_markup=_keyboard(context))
         return
-    user_id = str(update.effective_user.id)
-    fb = _fb(context)
 
     # If we're waiting for a comment (opcion=11), save the boleta with comment
     if context.user_data.get("opcion") == 11:
@@ -544,10 +544,6 @@ async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             context.user_data["opcion"] = 10
             context.user_data.pop("pending_boleta", None)
-            user = update.effective_user
-            await _update_user(user.id, user.first_name or "", user.last_name or "",
-                               user.username or "", fid,
-                               context.user_data.get("botones_on", 0), 10, context)
             msg = (f"\U0001f514 Boleta <b>{pending_boleta}</b> agregada como: <b>{code}</b>"
                    if lang == 1 else f"\U0001f514 Ticket <b>{pending_boleta}</b> added as: <b>{code}</b>")
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
@@ -720,10 +716,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Keyboard button: Alertas — enter monitor mode
     if text in _BTN_ALERTAS:
         context.user_data["opcion"] = 10
-        user = update.effective_user
-        await _update_user(user.id, user.first_name or "", user.last_name or "",
-                           user.username or "", fid,
-                           context.user_data.get("botones_on", 0), 10, context)
         msg_alert = ("<b>\U0001f514 Enviar codigo de boleta a monitorear</b>"
                      if lang == 1 else "<b>\U0001f514 Send ticket barcode to monitor</b>")
         await update.message.reply_text(msg_alert, parse_mode=ParseMode.HTML,
