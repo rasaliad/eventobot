@@ -1,7 +1,7 @@
 """Direct Firebird connection for notifications (not via RDC)."""
 
 import logging
-from firebird.driver import connect
+from firebird.driver import connect, driver_config
 
 logger = logging.getLogger(__name__)
 
@@ -9,10 +9,13 @@ logger = logging.getLogger(__name__)
 class FirebirdClient:
     """Synchronous Firebird client for notification queries."""
 
-    def __init__(self, database: str, user: str = "SYSDBA", password: str = "masterkey"):
+    def __init__(self, database: str, user: str = "SYSDBA", password: str = "masterkey",
+                 client_library: str = ""):
         self.database = database
         self.user = user
         self.password = password
+        if client_library:
+            driver_config.fb_client_library.value = client_library
 
     def _connect(self):
         return connect(self.database, user=self.user, password=self.password)

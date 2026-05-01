@@ -57,6 +57,7 @@ def main():
     fb_database = config.get("firebird", "database", fallback="")
     fb_user = config.get("firebird", "user", fallback="SYSDBA")
     fb_password = config.get("firebird", "password", fallback="masterkey")
+    fb_client_library = config.get("firebird", "client_library", fallback="")
 
     # Notification settings
     alert_interval = int(config.get("notifications", "alert_interval_seconds", fallback="10"))
@@ -71,7 +72,8 @@ def main():
 
     # Setup Firebird if configured
     if fb_database:
-        fb = FirebirdClient(database=fb_database, user=fb_user, password=fb_password)
+        fb = FirebirdClient(database=fb_database, user=fb_user, password=fb_password,
+                            client_library=fb_client_library)
         app.bot_data["firebird"] = fb
         logger.info("Firebird configured: %s", fb_database)
 

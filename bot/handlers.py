@@ -38,8 +38,8 @@ def _rdc(context: ContextTypes.DEFAULT_TYPE) -> RDCClient:
     return context.bot_data["rdc"]
 
 
-def _fb(context: ContextTypes.DEFAULT_TYPE) -> FirebirdClient:
-    return context.bot_data["firebird"]
+def _fb(context: ContextTypes.DEFAULT_TYPE) -> FirebirdClient | None:
+    return context.bot_data.get("firebird")
 
 
 def _to_int(val) -> int:
@@ -520,6 +520,12 @@ async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Validate boleta and ask for personal comment before saving."""
     lang = _lang(context)
     fid = context.user_data.get("funcion_id", 0)
+    logger.info("_add_monitor_boleta: code=%s fid=%s opcion=%s", code, fid, context.user_data.get("opcion"))
+    if fb is None:
+        await update.message.reply_text(
+            "Sistema de alertas no disponible (Firebird no configurado).",
+            reply_markup=_keyboard(context))
+        return
     user_id = str(update.effective_user.id)
     fb = _fb(context)
 
@@ -538,6 +544,10 @@ async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             context.user_data["opcion"] = 10
             context.user_data.pop("pending_boleta", None)
+            user = update.effective_user
+            await _update_user(user.id, user.first_name or "", user.last_name or "",
+                               user.username or "", fid,
+                               context.user_data.get("botones_on", 0), 10, context)
             msg = (f"\U0001f514 Boleta <b>{pending_boleta}</b> agregada como: <b>{code}</b>"
                    if lang == 1 else f"\U0001f514 Ticket <b>{pending_boleta}</b> added as: <b>{code}</b>")
             await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
@@ -577,7 +587,7 @@ async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE
                                                 reply_markup=_keyboard(context))
                 return
     except Exception:
-        pass
+        logger.warning("Error checking existing monitors for %s", code, exc_info=True)
 
     # Save boleta code and ask for comment
     context.user_data["pending_boleta"] = code
@@ -594,6 +604,12 @@ async def _send_mis_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fid = context.user_data.get("funcion_id", 0)
     user_id = str(update.effective_user.id)
     fb = _fb(context)
+
+    if fb is None:
+        await update.message.reply_text(
+            "Sistema de alertas no disponible (Firebird no configurado).",
+            reply_markup=_keyboard(context))
+        return
 
     try:
         monitors = fb.list_monitors(user_id, fid)
@@ -704,6 +720,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Keyboard button: Alertas — enter monitor mode
     if text in _BTN_ALERTAS:
         context.user_data["opcion"] = 10
+        user = update.effective_user
+        await _update_user(user.id, user.first_name or "", user.last_name or "",
+                           user.username or "", fid,
+                           context.user_data.get("botones_on", 0), 10, context)
         msg_alert = ("<b>\U0001f514 Enviar codigo de boleta a monitorear</b>"
                      if lang == 1 else "<b>\U0001f514 Send ticket barcode to monitor</b>")
         await update.message.reply_text(msg_alert, parse_mode=ParseMode.HTML,
