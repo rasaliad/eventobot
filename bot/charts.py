@@ -1,83 +1,138 @@
-"""Chart generation using Plotly for attendance data."""
+"""Chart generation using HTML + Chrome headless."""
 
 import logging
+import math
+import os
+import tempfile
 
-import plotly.graph_objects as go
+from html2image import Html2Image
 
 logger = logging.getLogger(__name__)
 
-# Theme — light background for Telegram
-C_BG = "#f5f6fa"
-C_PAPER = "#ffffff"
-C_GREEN = "#27ae60"
-C_RED = "#c0392b"
-C_BLUE = "#2980b9"
-C_TEXT = "#2c3e50"
-C_TEXT_DIM = "#7f8c8d"
-C_GRID = "#dcdde1"
+_BROWSER = None
+for path in [
+    "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+    "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+    "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+]:
+    if os.path.isfile(path):
+        _BROWSER = path
+        break
 
 
-def generate_totals_chart(funcion_name: str, rows: list, lang: int = 1) -> bytes:
-    """Horizontal bar chart for total attendance."""
-    labels = []
-    values = []
-    pcts = []
-    colors = [C_BLUE, C_GREEN, C_RED]
-
-    for i, row in enumerate(rows):
-        desc = str(row[0]).strip()
-        val_str = str(row[1]).strip().replace(",", "")
-        pct_str = str(row[2]).strip() if row[2] else ""
-        try:
-            val = int(float(val_str))
-        except (ValueError, TypeError):
-            val = 0
-        labels.append(desc)
-        values.append(val)
-        pcts.append(pct_str)
-
-    # Reverse for top-to-bottom display
-    labels.reverse()
-    values.reverse()
-    pcts.reverse()
-    bar_colors = list(reversed(colors[:len(labels)]))
-
-    text_items = []
-    for v, p in zip(values, pcts):
-        text_items.append(f"  <b>{v:,}</b>  ({p})" if p else f"  <b>{v:,}</b>")
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        y=labels, x=values, orientation="h",
-        marker=dict(color=bar_colors, cornerradius=5),
-        text=text_items, textposition="outside",
-        textfont=dict(size=15, color=C_TEXT, family="Arial"),
-        width=0.55,
-    ))
-
-    subtitle = "Asistencia Total" if lang == 1 else "Total Attendance"
-    fig.update_layout(
-        title=dict(
-            text=f"<b>{funcion_name}</b><br><span style='font-size:12px;color:{C_TEXT_DIM}'>{subtitle}</span>",
-            font=dict(size=18, color=C_TEXT, family="Arial"), x=0.02, xanchor="left",
-        ),
-        plot_bgcolor=C_BG, paper_bgcolor=C_PAPER,
-        font=dict(color=C_TEXT, family="Arial", size=14),
-        xaxis=dict(visible=False, range=[0, max(values) * 1.4]),
-        yaxis=dict(tickfont=dict(size=14, family="Arial Black", color=C_TEXT), gridcolor="rgba(0,0,0,0)"),
-        margin=dict(l=130, r=30, t=75, b=15),
-        width=620, height=max(200, 75 + len(labels) * 80),
-        showlegend=False,
-    )
-    return _fig_to_png(fig)
+def _render_html(html: str, width: int, height: int) -> bytes:
+    if not _BROWSER:
+        raise RuntimeError("No Chrome/Edge found")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        hti = Html2Image(
+            output_path=tmpdir,
+            size=(width, height),
+            browser_executable=_BROWSER,
+        )
+        hti.screenshot(html_str=html, save_as="chart.png")
+        with open(os.path.join(tmpdir, "chart.png"), "rb") as f:
+            return f.read()
 
 
-def generate_detail_chart(funcion_name: str, rows: list, lang: int = 1) -> bytes:
-    """Bar chart showing entered vs available per area, with clear green/red."""
+def _build_table(headers, rows, total_row=None):
+    hdr = ""
+    for i, h in enumerate(headers):
+        align = "left" if i == 0 else "right"
+        hdr += f'<th style="padding:8px 10px;text-align:{align}">{h}</th>'
+    body = ""
+    for idx, row in enumerate(rows):
+        bg = "#f5f5f5" if idx % 2 == 0 else "white"
+        cells = ""
+        for i, val in enumerate(row):
+            align = "left" if i == 0 else "right"
+            color = "#c62828" if i == len(row) - 1 and i > 1 else "#333"
+            cells += f'<td style="padding:6px 10px;text-align:{align};color:{color}">{val}</td>'
+        body += f'<tr style="background:{bg}">{cells}</tr>'
+    total_html = ""
+    if total_row:
+        cells = ""
+        for i, val in enumerate(total_row):
+            align = "left" if i == 0 else "right"
+            cells += f'<td style="padding:8px 10px;text-align:{align}">{val}</td>'
+        total_html = f'<tr style="background:#1a237e;color:white;font-weight:bold">{cells}</tr>'
+    return f"""
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:15px">
+        <thead><tr style="background:#1a237e;color:white">{hdr}</tr></thead>
+        <tbody>{body}{total_html}</tbody>
+    </table>"""
+
+
+def _svg_pie(entered, remaining):
+    """Pie chart: blue = entered, gray = remaining."""
+    total = entered + remaining
+    if total == 0:
+        return ""
+
+    pct_entered = entered / total
+    pct_remain = remaining / total
+    cx, cy, r = 110, 110, 95
+
+    min_angle = 7
+    angle_entered = pct_entered * 360
+    angle_remain = pct_remain * 360
+    if 0 < angle_entered < min_angle:
+        angle_entered = min_angle
+        angle_remain = 360 - min_angle
+    elif 0 < angle_remain < min_angle:
+        angle_remain = min_angle
+        angle_entered = 360 - min_angle
+
+    c_blue = "#4472C4"
+    c_gray = "#c8c8d0"
+    paths = ""
+
+    if pct_remain == 0:
+        paths += f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c_blue}"/>'
+    elif pct_entered == 0:
+        paths += f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c_gray}"/>'
+    else:
+        start = -90
+        end = start + angle_entered
+        large = 1 if angle_entered > 180 else 0
+        x1 = cx + r * math.cos(math.radians(start))
+        y1 = cy + r * math.sin(math.radians(start))
+        x2 = cx + r * math.cos(math.radians(end))
+        y2 = cy + r * math.sin(math.radians(end))
+        paths += f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{r},{r} 0 {large},1 {x2:.1f},{y2:.1f} Z" fill="{c_blue}"/>'
+
+        start2 = end
+        end2 = start2 + angle_remain
+        large2 = 1 if angle_remain > 180 else 0
+        x3 = cx + r * math.cos(math.radians(start2))
+        y3 = cy + r * math.sin(math.radians(start2))
+        x4 = cx + r * math.cos(math.radians(end2))
+        y4 = cy + r * math.sin(math.radians(end2))
+        paths += f'<path d="M{cx},{cy} L{x3:.1f},{y3:.1f} A{r},{r} 0 {large2},1 {x4:.1f},{y4:.1f} Z" fill="{c_gray}"/>'
+
+    if pct_entered >= 0.03:
+        mid = -90 + angle_entered / 2
+        lx = cx + r * 0.6 * math.cos(math.radians(mid))
+        ly = cy + r * 0.6 * math.sin(math.radians(mid))
+        paths += f'<text x="{lx:.0f}" y="{ly:.0f}" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="14" font-weight="bold" font-family="Arial">{pct_entered * 100:.1f}%</text>'
+
+    if pct_remain >= 0.03:
+        mid2 = -90 + angle_entered + angle_remain / 2
+        lx2 = cx + r * 0.6 * math.cos(math.radians(mid2))
+        ly2 = cy + r * 0.6 * math.sin(math.radians(mid2))
+        paths += f'<text x="{lx2:.0f}" y="{ly2:.0f}" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="14" font-weight="bold" font-family="Arial">{pct_remain * 100:.1f}%</text>'
+
+    return f'<svg viewBox="0 0 220 220" width="200" style="display:block;margin:0 auto">{paths}</svg>'
+
+
+def generate_chart(funcion_name: str, detail_rows: list, total_entered: int,
+                   total_remaining: int, lang: int = 1) -> bytes:
+    """Combined image: detail table + totals pie chart."""
+    # Parse detail areas
     areas = []
-    total_row = None
+    total_row_data = None
 
-    for row in rows:
+    for row in detail_rows:
         area = str(row[1]).strip()
         try:
             disponibles = int(float(str(row[2]).strip().replace(",", "")))
@@ -90,95 +145,57 @@ def generate_detail_chart(funcion_name: str, rows: list, lang: int = 1) -> bytes
         no_entraron = disponibles - entradas
 
         if area.upper() == "TOTAL":
-            total_row = (area, disponibles, entradas, no_entraron)
+            total_row_data = (area, disponibles, entradas, no_entraron)
         elif disponibles > 0 or entradas > 0:
             areas.append((area, disponibles, entradas, no_entraron))
 
     if not areas:
-        return _empty_chart()
+        return _render_html('<div style="padding:40px;font-size:18px">No data</div>', 400, 100)
 
-    # Reverse for top-to-bottom
-    areas.reverse()
+    # Detail table
+    h_area = "AREA" if lang == 1 else "SECTION"
+    h_read = "LEIDAS" if lang == 1 else "READ"
+    h_remain = "FALTAN" if lang == 1 else "REMAIN"
+    table_rows = [[a, f"{d:,}", f"{e:,}", f"{n:,}"] for a, d, e, n in areas]
+    total_r = None
+    if total_row_data:
+        _, td, te, tn = total_row_data
+        total_r = ["TOTAL", f"{td:,}", f"{te:,}", f"{tn:,}"]
+    table = _build_table([h_area, "TOTAL", h_read, h_remain], table_rows, total_r)
 
-    area_names = [a[0] for a in areas]
-    entered = [a[2] for a in areas]
-    remaining = [a[3] for a in areas]
-    disponibles = [a[1] for a in areas]
+    # Total summary line
+    total_disp = total_entered + total_remaining
+    pct = total_entered * 100 / total_disp if total_disp > 0 else 0
+    lbl = "Asistencia" if lang == 1 else "Attendance"
+    summary = f'<div style="text-align:center;font-size:15px;font-weight:bold;color:#1a237e;margin:10px 0">{lbl}: {total_entered:,} / {total_disp:,} ({pct:.1f}%)</div>'
 
-    # Labels
-    entered_text = []
-    for e, d in zip(entered, disponibles):
-        pct = f"{e * 100 // d}%" if d > 0 else "0%"
-        entered_text.append(f" {e:,} ({pct})")
-
-    remaining_text = [f" {r:,}" for r in remaining]
-
-    fig = go.Figure()
+    # Pie chart
+    pie = _svg_pie(total_entered, total_remaining)
 
     lbl_entered = "Entradas" if lang == 1 else "Entered"
-    fig.add_trace(go.Bar(
-        y=area_names, x=entered, orientation="h", name=lbl_entered,
-        marker=dict(color=C_GREEN, cornerradius=3),
-        text=entered_text, textposition="inside", textangle=0,
-        textfont=dict(size=11, color="white", family="Arial Black"),
-        insidetextanchor="start",
-        width=0.6,
-    ))
+    lbl_remain = "Faltan" if lang == 1 else "Remaining"
+    legend = f"""
+    <div style="display:flex;justify-content:center;gap:20px;margin-top:8px;font-size:12px;color:#555">
+        <div style="display:flex;align-items:center">
+            <div style="width:14px;height:14px;background:#4472C4;border-radius:2px;margin-right:5px"></div>
+            <b>{lbl_entered}</b>
+        </div>
+        <div style="display:flex;align-items:center">
+            <div style="width:14px;height:14px;background:#c8c8d0;border-radius:2px;margin-right:5px"></div>
+            <b>{lbl_remain}</b>
+        </div>
+    </div>"""
 
-    lbl_remain = "Restan" if lang == 1 else "Remaining"
-    fig.add_trace(go.Bar(
-        y=area_names, x=remaining, orientation="h", name=lbl_remain,
-        marker=dict(color=C_RED, opacity=0.7, cornerradius=3),
-        text=remaining_text, textposition="inside", textangle=0,
-        textfont=dict(size=11, color="white", family="Arial"),
-        insidetextanchor="start",
-        width=0.6,
-    ))
+    html = f"""
+    <div style="font-family:'Segoe UI',Arial,sans-serif;background:white;padding:20px;width:500px">
+        <h2 style="text-align:center;color:#1a237e;margin:0 0 15px;font-size:18px;letter-spacing:1px">
+            {funcion_name}
+        </h2>
+        {table}
+        {summary}
+        {pie}
+        {legend}
+    </div>"""
 
-    # Title with total
-    subtitle = "Asistencia por Area" if lang == 1 else "Attendance by Section"
-    total_text = ""
-    if total_row:
-        _, t_disp, t_entr, _ = total_row
-        t_pct = f"{t_entr * 100 // t_disp}%" if t_disp > 0 else "0%"
-        total_text = f"<br><b>TOTAL: {t_entr:,} / {t_disp:,} ({t_pct})</b>"
-
-    fig.update_layout(
-        barmode="stack",
-        title=dict(
-            text=f"<b>{funcion_name}</b><br><span style='font-size:12px;color:{C_TEXT_DIM}'>{subtitle}</span>{total_text}",
-            font=dict(size=16, color=C_TEXT, family="Arial"), x=0.02, xanchor="left",
-        ),
-        plot_bgcolor=C_BG, paper_bgcolor=C_PAPER,
-        font=dict(color=C_TEXT, family="Arial", size=12),
-        xaxis=dict(visible=False),
-        yaxis=dict(
-            tickfont=dict(size=11, family="Arial", color=C_TEXT),
-            gridcolor="rgba(0,0,0,0)",
-        ),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-            font=dict(size=12, color=C_TEXT), bgcolor="rgba(0,0,0,0)",
-        ),
-        margin=dict(l=140, r=20, t=100 + (20 if total_row else 0), b=15),
-        width=700,
-        height=max(280, 120 + len(areas) * 42),
-        showlegend=True,
-    )
-    return _fig_to_png(fig)
-
-
-def _fig_to_png(fig: go.Figure) -> bytes:
-    return fig.to_image(format="png", scale=2, engine="kaleido")
-
-
-def _empty_chart() -> bytes:
-    fig = go.Figure()
-    fig.add_annotation(text="No data", x=0.5, y=0.5, showarrow=False,
-                       font=dict(size=24, color=C_TEXT))
-    fig.update_layout(
-        plot_bgcolor=C_BG, paper_bgcolor=C_PAPER,
-        xaxis=dict(visible=False), yaxis=dict(visible=False),
-        width=400, height=150,
-    )
-    return _fig_to_png(fig)
+    height = 440 + len(areas) * 35
+    return _render_html(html, 540, height)

@@ -24,6 +24,8 @@ from telegram.ext import (
     filters,
 )
 
+from .charts import generate_chart
+from .firebird_client import FirebirdClient
 from .i18n import t
 from .rdc_client import RDCClient
 
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 def _rdc(context: ContextTypes.DEFAULT_TYPE) -> RDCClient:
     return context.bot_data["rdc"]
+
+
+def _fb(context: ContextTypes.DEFAULT_TYPE) -> FirebirdClient | None:
+    return context.bot_data.get("firebird")
 
 
 def _to_int(val) -> int:
@@ -57,19 +63,31 @@ _BTN_DETALLES = {"Detalles", "Details"}
 _BTN_QUIEN = {"Quien", "Who"}
 _BTN_BOLETA = {"Boleta", "Ticket"}
 _BTN_REPORTES = {"Reportes", "Reports"}
+_BTN_GRAFICO = {"\U0001f4ca Grafico", "\U0001f4ca Chart"}
+_BTN_ALERTAS = {"\U0001f514 Alertas", "\U0001f514 Alerts"}
+_BTN_MIS_ALERTAS = {"\U0001f4cb Mis Alertas", "\U0001f4cb My Alerts"}
 
 
 def _keyboard(context: ContextTypes.DEFAULT_TYPE) -> ReplyKeyboardMarkup:
-    """Build the fixed reply keyboard. 'Quien' row only for rol_id=1."""
+    """Build the fixed reply keyboard."""
     lang = _lang(context)
     row1 = [
         KeyboardButton(t("bAsistenciaTot", lang)),
         KeyboardButton(t("bAsistenciaDet", lang)),
     ]
-    row2 = []
+    row2 = [
+        KeyboardButton("\U0001f514 Alertas" if lang == 1 else "\U0001f514 Alerts"),
+        KeyboardButton("\U0001f4cb Mis Alertas" if lang == 1 else "\U0001f4cb My Alerts"),
+    ]
+    row3 = []
+    if context.user_data.get("botones_on", 0) == 1:
+        row3.append(KeyboardButton("\U0001f4ca Grafico" if lang == 1 else "\U0001f4ca Chart"))
     if _rol(context) == 1:
-        row2.append(KeyboardButton(t("bQuien", lang)))
-    return ReplyKeyboardMarkup([row1, row2], resize_keyboard=True)
+        row3.append(KeyboardButton(t("bQuien", lang)))
+    rows = [row1, row2]
+    if row3:
+        rows.append(row3)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -86,6 +104,8 @@ async def _authenticate(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     if not skip_log:
         text = (update.message.text if update.message else "") or ""
+        # Strip emojis/non-ASCII for Firebird ISO8859 compatibility
+        text = text.encode("ascii", errors="ignore").decode("ascii").strip()
         try:
             await rdc.execute_batch([("ins_usuario_log", [str(user.id), text])])
         except Exception:
@@ -306,6 +326,53 @@ async def _send_detalles(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     reply_markup=_keyboard(context))
 
 
+# ── Image charts ─────────────────────────────────────────────────────────────
+
+async def _send_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send combined image: detail table + totals pie chart."""
+    rdc = _rdc(context)
+    lang = _lang(context)
+    fid = context.user_data.get("funcion_id", 0)
+    fname = context.user_data.get("funcion_name", "")
+    await update.message.chat.send_action(ChatAction.UPLOAD_PHOTO)
+    try:
+        res_det = await rdc.execute_query("asistencia_detalle", [fid])
+        res_tot = await rdc.execute_query("asistencia_total", [fid, lang])
+    except Exception:
+        logger.error("Error querying data for chart", exc_info=True)
+        await update.message.reply_text("Error getting data", reply_markup=_keyboard(context))
+        return
+    if not res_det or not res_det.rows:
+        await update.message.reply_text(t("NoExisteFuncion", lang),
+                                        parse_mode=ParseMode.HTML, reply_markup=_keyboard(context))
+        return
+
+    # Extract totals for pie
+    entered = 0
+    remaining = 0
+    if res_tot and res_tot.rows:
+        for row in res_tot.rows:
+            desc = str(row[0]).strip().upper()
+            val_str = str(row[1]).strip().replace(",", "")
+            try:
+                val = int(float(val_str))
+            except (ValueError, TypeError):
+                val = 0
+            if "ENTRADA" in desc or "ENTER" in desc:
+                entered = val
+            elif "RESTA" in desc or "REMAIN" in desc:
+                remaining = val
+
+    try:
+        img = generate_chart(fname, res_det.rows, entered, remaining, lang)
+        await update.message.reply_photo(
+            photo=img, reply_markup=_keyboard(context),
+            read_timeout=60, write_timeout=60)
+    except Exception:
+        logger.error("Error generating chart image", exc_info=True)
+        await update.message.reply_text("Error generating image", reply_markup=_keyboard(context))
+
+
 # ── Quien ────────────────────────────────────────────────────────────────────
 
 async def _send_quien(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,6 +514,160 @@ async def reportes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_reportes(update, context)
 
 
+# ── Alertas (boleta monitoring) ───────────────────────────────────────────────
+
+async def _add_monitor_boleta(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str):
+    """Validate boleta and ask for personal comment before saving."""
+    lang = _lang(context)
+    fid = context.user_data.get("funcion_id", 0)
+    user_id = str(update.effective_user.id)
+    fb = _fb(context)
+    logger.info("_add_monitor_boleta: code=%s fid=%s opcion=%s", code, fid, context.user_data.get("opcion"))
+    if fb is None:
+        await update.message.reply_text(
+            "Sistema de alertas no disponible (Firebird no configurado).",
+            reply_markup=_keyboard(context))
+        return
+
+    # If we're waiting for a comment (opcion=11), save the boleta with comment
+    if context.user_data.get("opcion") == 11:
+        pending_boleta = context.user_data.get("pending_boleta", "")
+        if pending_boleta:
+            try:
+                added = fb.add_monitor(user_id, pending_boleta, fid, comentario=code)
+            except Exception:
+                logger.error("Error adding monitor", exc_info=True)
+                await update.message.reply_text("Error saving alert",
+                                                reply_markup=_keyboard(context))
+                context.user_data["opcion"] = 10
+                return
+
+            context.user_data["opcion"] = 10
+            context.user_data.pop("pending_boleta", None)
+            msg = (f"\U0001f514 Boleta <b>{pending_boleta}</b> agregada como: <b>{code}</b>"
+                   if lang == 1 else f"\U0001f514 Ticket <b>{pending_boleta}</b> added as: <b>{code}</b>")
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                            reply_markup=_keyboard(context))
+            return
+
+    try:
+        boleta_data = fb.boleta_exists(fid, code)
+    except Exception:
+        logger.error("Error checking boleta in Firebird", exc_info=True)
+        await update.message.reply_text("Error connecting to database",
+                                        reply_markup=_keyboard(context))
+        return
+
+    if boleta_data is None:
+        msg = (f"\u274c Boleta <b>{code}</b> no existe en esta funcion"
+               if lang == 1 else f"\u274c Ticket <b>{code}</b> does not exist for this event")
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                        reply_markup=_keyboard(context))
+        return
+
+    if boleta_data["entro"] == 1:
+        msg = (f"\u2705 Boleta <b>{code}</b> ya entro"
+               if lang == 1 else f"\u2705 Ticket <b>{code}</b> already entered")
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                        reply_markup=_keyboard(context))
+        return
+
+    # Check if already monitored
+    try:
+        existing = fb.list_monitors(user_id, fid)
+        for b, _, _ in existing:
+            if b == code:
+                msg = (f"\U0001f514 Boleta <b>{code}</b> ya esta en tu lista"
+                       if lang == 1 else f"\U0001f514 Ticket <b>{code}</b> is already in your list")
+                await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                                reply_markup=_keyboard(context))
+                return
+    except Exception:
+        logger.warning("Error checking existing monitors for %s", code, exc_info=True)
+
+    # Save boleta code and ask for comment
+    context.user_data["pending_boleta"] = code
+    context.user_data["opcion"] = 11
+    msg = (f"Boleta <b>{code}</b> encontrada.\n<b>Enviar comentario</b> (ej: Invitado, Cliente, Mi hermano):"
+           if lang == 1 else f"Ticket <b>{code}</b> found.\n<b>Send a comment</b> (e.g.: Guest, Client):")
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                    reply_markup=_keyboard(context))
+
+
+async def _send_mis_alertas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show list of monitored boletas with remove buttons."""
+    lang = _lang(context)
+    fid = context.user_data.get("funcion_id", 0)
+    user_id = str(update.effective_user.id)
+    fb = _fb(context)
+
+    if fb is None:
+        await update.message.reply_text(
+            "Sistema de alertas no disponible (Firebird no configurado).",
+            reply_markup=_keyboard(context))
+        return
+
+    try:
+        monitors = fb.list_monitors(user_id, fid)
+    except Exception:
+        logger.error("Error listing monitors", exc_info=True)
+        await update.message.reply_text("Error loading alerts",
+                                        reply_markup=_keyboard(context))
+        return
+
+    if not monitors:
+        msg = ("\U0001f4cb No tienes boletas en monitoreo"
+               if lang == 1 else "\U0001f4cb You have no monitored tickets")
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                        reply_markup=_keyboard(context))
+        return
+
+    lines = []
+    buttons = []
+    for boleta, notificado, comentario in monitors:
+        if notificado == 0:
+            status = "\U0001f7e1 Esperando"
+        elif notificado == 1:
+            status = "\U0001f7e2 Entro!"
+        else:
+            status = "\u2705 Notificado"
+        label = comentario if comentario else boleta
+        lines.append(f"{status}  <b>{label}</b>")
+        lines.append(f"       <code>{boleta}</code>")
+        if notificado < 2:
+            btn_label = comentario if comentario else boleta
+            buttons.append([InlineKeyboardButton(
+                f"\u274c {btn_label}", callback_data=f"rm_alert_{boleta}")])
+
+    title = "<b>\U0001f4cb Mis Alertas:</b>" if lang == 1 else "<b>\U0001f4cb My Alerts:</b>"
+    msg = title + "\n\n" + "\n".join(lines)
+
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML,
+                                    reply_markup=markup or _keyboard(context))
+
+
+async def remove_alert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle remove alert inline button."""
+    query = update.callback_query
+    await query.answer()
+
+    boleta = query.data.replace("rm_alert_", "")
+    user_id = str(update.effective_user.id)
+    fid = context.user_data.get("funcion_id", 0)
+    lang = _lang(context)
+    fb = _fb(context)
+
+    try:
+        fb.remove_monitor(user_id, boleta, fid)
+    except Exception:
+        logger.error("Error removing monitor", exc_info=True)
+
+    msg = (f"\u274c Boleta <b>{boleta}</b> removida de alertas"
+           if lang == 1 else f"\u274c Ticket <b>{boleta}</b> removed from alerts")
+    await query.edit_message_text(msg, parse_mode=ParseMode.HTML)
+
+
 # ── Text handler (keyboard buttons + barcode/function ID input) ──────────────
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -486,9 +707,36 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_detalles(update, context)
         return
 
+    # Keyboard button: Grafico
+    if text in _BTN_GRAFICO:
+        context.user_data["opcion"] = 0
+        await _send_grafico(update, context)
+        return
+
+    # Keyboard button: Alertas — enter monitor mode
+    if text in _BTN_ALERTAS:
+        context.user_data["opcion"] = 10
+        msg_alert = ("<b>\U0001f514 Enviar codigo de boleta a monitorear</b>"
+                     if lang == 1 else "<b>\U0001f514 Send ticket barcode to monitor</b>")
+        await update.message.reply_text(msg_alert, parse_mode=ParseMode.HTML,
+                                        reply_markup=_keyboard(context))
+        return
+
+    # Keyboard button: Mis Alertas — show monitored boletas
+    if text in _BTN_MIS_ALERTAS:
+        context.user_data["opcion"] = 0
+        await _send_mis_alertas(update, context)
+        return
+
     # Keyboard button: Reportes
     if text in _BTN_REPORTES:
         await _send_reportes(update, context)
+        return
+
+    # Waiting for boleta code (opcion=10) or comment (opcion=11)
+    opcion = context.user_data.get("opcion", 0)
+    if opcion in (10, 11) and len(text) >= 2:
+        await _add_monitor_boleta(update, context, text)
         return
 
     # Any other text = treat as ticket barcode
@@ -506,8 +754,9 @@ def register_handlers(app):
     app.add_handler(CommandHandler("boleta", boleta_command_handler))
     app.add_handler(CommandHandler("reportes", reportes_handler))
 
-    # Inline callback only for function selection
+    # Inline callbacks
     app.add_handler(CallbackQueryHandler(select_function_callback, pattern=r"^sel_fn_"))
+    app.add_handler(CallbackQueryHandler(remove_alert_callback, pattern=r"^rm_alert_"))
 
     # Text messages (keyboard buttons, barcodes, function IDs)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
